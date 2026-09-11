@@ -1,0 +1,27 @@
+manifestVersion: 1
+name: '@vcjdeboer/esp32'
+version: 2026.09.11.5
+description: >
+  Drive an ESP32 running MicroPython from swamp over USB serial, with no
+  Arduino IDE: flash the board, run Python or a firmware line-protocol, scan
+  WiFi and Bluetooth, and record every exchange as versioned data.
+repository: 'https://github.com/vcjdeboer/esp32-serial'
+license: MIT
+models:
+  - esp32_serial.ts
+workflows: []
+vaults: []
+drivers: []
+datastores: []
+reports: []
+additionalFiles:
+  - README.md
+  - LICENSE
+  - extensions/files/serial_worker.ts
+binaries: []
+dependencies: []
+platforms:
+  - darwin-aarch64
+  - darwin-x86_64
+  - linux-x86_64
+  - linux-aarch64

@@ -1,0 +1,9 @@
+# swamp runtime data (created when this repo is used as a swamp repo)
+.swamp/
+.swamp-sources.yaml
+
+# Deno
+deno.lock
+
+# OS
+.DS_Store

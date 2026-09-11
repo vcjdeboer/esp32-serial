@@ -1,0 +1,9 @@
+{
+  "tasks": {
+    "check": "deno check extensions/models/esp32_serial.ts extensions/models/_lib/serial_link.ts extensions/models/_lib/holder_paths.ts extensions/files/serial_worker.ts",
+    "test": "deno test -A"
+  },
+  "fmt": {
+    "exclude": ["extensions/files/fake_board.py"]
+  }
+}
