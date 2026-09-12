@@ -1,14 +1,17 @@
 manifestVersion: 1
 name: '@vcjdeboer/esp32'
-version: 2026.09.11.5
+version: 2026.09.12.1
 description: >
-  Drive an ESP32 running MicroPython from swamp over USB serial, with no
-  Arduino IDE: flash the board, run Python or a firmware line-protocol, scan
-  WiFi and Bluetooth, and record every exchange as versioned data.
+  Drive ESP32 (and other MicroPython) boards from swamp over USB serial, no
+  Arduino IDE. Two model types on a shared serial transport: `esp32-serial`
+  (flash, REPL, a simple line protocol, WiFi/Bluetooth) and `uc2-device` (the
+  UC2-ESP structured task protocol with qid/ACK/DONE). Every exchange is
+  recorded as versioned data.
 repository: 'https://github.com/vcjdeboer/esp32-serial'
 license: MIT
 models:
   - esp32_serial.ts
+  - uc2_device.ts
 workflows: []
 vaults: []
 drivers: []

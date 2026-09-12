@@ -15,6 +15,7 @@ closes. Commands are lines; control bytes are handled as MicroPython does.
   <code>\\x04     -> "OK" + "ran\\r\\n" + "\\x04" + "\\x04" + ">"   (raw REPL exec)
   \\x04 (normal)  -> soft reset banner + '{"ok": true, "fw": "fake 0.1"}\\r\\n'
 """
+import json
 import os
 import pty
 import select
@@ -71,7 +72,26 @@ while True:
         elif b"\n" in buf:
             line, _, buf = buf.partition(b"\n")
             cmd = line.strip()
-            if cmd == b"ping":
+            if cmd.startswith(b"{"):
+                # UC2-style structured request: {"task":"/x","qid":N,...}
+                try:
+                    req = json.loads(cmd)
+                except Exception:
+                    req = None
+                if req and "task" in req and "qid" in req and str(req["task"]).startswith("/"):
+                    q = req["qid"]
+                    t = req["task"]
+                    if str(t).endswith("_get"):
+                        send(('{"qid": %d, "value": 42, "task": %s}\r\n' % (q, json.dumps(t))).encode())
+                    else:
+                        send(('{"qid": %d}\r\n' % q).encode())          # ACK
+                        time.sleep(0.05)
+                        send(('{"qid": %d, "progress": 50}\r\n' % q).encode())  # event
+                        time.sleep(0.05)
+                        send(('{"qid": %d, "result": "done", "success": 1, "task": %s}\r\n' % (q, json.dumps(t))).encode())  # DONE
+                elif req is not None:
+                    send(b'{"ok": false, "error": "bad request"}\r\n')
+            elif cmd == b"ping":
                 send(b'{"ok": true, "fw": "fake 0.1"}\r\n')
             elif cmd == b"quiet":
                 pass

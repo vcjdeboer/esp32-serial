@@ -36,10 +36,17 @@
 import { z } from "npm:zod@4";
 import { SerialLink } from "./_lib/serial_link.ts";
 import {
-  ensureSocketDir,
-  socketDir,
-  socketPathFor,
-} from "./_lib/holder_paths.ts";
+  DevicesSchema,
+  HolderSchema,
+  holderSocketPath,
+  holderState,
+  lastJsonLine,
+  resolveDevice,
+  selectDevice,
+  stripEscapes,
+  withLink,
+  WORKER,
+} from "./_lib/device.ts";
 
 const GlobalArgsSchema = z.object({
   device: z.string().optional().describe(
@@ -87,17 +94,6 @@ const EVIDENTIARY = {
   garbageCollection: 10_000,
 } as const;
 
-const DevicesSchema = z.object({
-  os: z.string(),
-  candidates: z.array(z.string()).describe(
-    "Serial device nodes found under /dev",
-  ),
-  selected: z.string().nullable().describe(
-    "The configured device, or the single candidate, or null when ambiguous",
-  ),
-  observedAt: z.iso.datetime(),
-});
-
 const LinkSchema = z.object({
   device: z.string(),
   baud: z.number(),
@@ -115,6 +111,7 @@ const LinkSchema = z.object({
   transport: z.enum(["spawn", "socket"]).describe(
     "Per-call worker, or the holder",
   ),
+  outcome: z.string().describe("Run result: ok, error, partial, or timeout"),
   observedAt: z.iso.datetime(),
   elapsedMs: z.number(),
 });
@@ -127,6 +124,7 @@ const ReplSchema = z.object({
   timedOut: z.boolean().describe(
     "True when the code had not finished within timeoutMs; output is partial",
   ),
+  outcome: z.string().describe("Run result: ok, error, partial, or timeout"),
   observedAt: z.iso.datetime(),
   elapsedMs: z.number(),
 });
@@ -142,6 +140,7 @@ const CommandSchema = z.object({
   ),
   timedOut: z.boolean().describe("True when the reply hit the hard timeout"),
   reason: z.string().describe("Why the wait ended: until, idle, or timeout"),
+  outcome: z.string().describe("Run result: ok, error, partial, or timeout"),
   observedAt: z.iso.datetime(),
   elapsedMs: z.number(),
 });
@@ -153,12 +152,14 @@ const CaptureSchema = z.object({
   reason: z.string().describe(
     "idle when the line went quiet, timeout when the cap was reached",
   ),
+  outcome: z.string().describe("Run result: ok, error, partial, or timeout"),
   observedAt: z.iso.datetime(),
 });
 
 const SentSchema = z.object({
   data: z.string(),
   bytes: z.number(),
+  outcome: z.string().describe("Run result: ok, error, partial, or timeout"),
   observedAt: z.iso.datetime(),
 });
 
@@ -176,6 +177,7 @@ const FlashSchema = z.object({
   portBackAfterMs: z.number().describe(
     "How long the port took to re-enumerate",
   ),
+  outcome: z.string().describe("Run result: ok, error, partial, or timeout"),
   observedAt: z.iso.datetime(),
   elapsedMs: z.number(),
 });
@@ -189,6 +191,7 @@ const UploadSchema = z.object({
     verified: z.boolean().describe("The board's sha256 of the file matches"),
   })),
   resumed: z.boolean().describe("Soft-reset afterwards so main.py runs"),
+  outcome: z.string().describe("Run result: ok, error, partial, or timeout"),
   observedAt: z.iso.datetime(),
   elapsedMs: z.number(),
 });
@@ -202,6 +205,7 @@ const WifiSchema = z.object({
     rssi: z.number(),
     auth: z.number(),
   })).describe("Strongest first, capped at `top`"),
+  outcome: z.string().describe("Run result: ok, error, partial, or timeout"),
   observedAt: z.iso.datetime(),
   elapsedMs: z.number(),
 });
@@ -211,20 +215,9 @@ const BleSchema = z.object({
   addrType: z.number(),
   mac: z.string(),
   gapName: z.string(),
+  outcome: z.string().describe("Run result: ok, error, partial, or timeout"),
   observedAt: z.iso.datetime(),
   elapsedMs: z.number(),
-});
-
-const HolderSchema = z.object({
-  live: z.boolean(),
-  socket: z.string(),
-  pid: z.number().nullable(),
-  device: z.string().nullable().describe(
-    "The port the holder has open, if any",
-  ),
-  requestsServed: z.number(),
-  idleTimeoutMs: z.number(),
-  observedAt: z.iso.datetime(),
 });
 
 /** The slice of swamp's method context these methods use. */
@@ -244,58 +237,10 @@ interface MethodContext {
   extensionFile: (relPath: string) => string;
 }
 
-const WORKER = "extensions/files/serial_worker.ts";
 const CTRL_A = "\x01"; // raw REPL
 const CTRL_B = "\x02"; // normal REPL
 const CTRL_C = "\x03"; // interrupt
 const CTRL_D = "\x04"; // soft reset (normal REPL) / end of input (raw REPL)
-
-/**
- * ANSI escape sequences (CSI, OSC, DCS and friends, two-byte escapes) and
- * carriage returns, which MicroPython and the ESP ROM bootloader both emit
- * and which otherwise defeat end-anchored matching.
- */
-const ESC = String.fromCharCode(0x1b);
-const BEL = String.fromCharCode(0x07);
-const ESCAPE_RE = new RegExp(
-  [
-    `${ESC}\\[[0-9;?]*[ -/]*[@-~]`, // CSI
-    `${ESC}\\][^${BEL}${ESC}]*(?:${BEL}|${ESC}\\\\)`, // OSC, BEL or ST terminated
-    `${ESC}[PX^_][^${ESC}]*${ESC}\\\\`, // DCS / SOS / PM / APC
-    `${ESC}[@-Z\\\\-_]`, // two-byte escapes
-    "\\r",
-  ].join("|"),
-  "g",
-);
-
-/** Strip escape sequences and carriage returns. */
-export function stripEscapes(s: string): string {
-  return s.replace(ESCAPE_RE, "");
-}
-
-/**
- * Where the holder's unix socket lives for this model instance: a private
- * per-user directory and a 12-hex hash of the model id (see holder_paths).
- * One model instance is one board, so the instance is the identity.
- */
-export async function holderSocketPath(modelId: string): Promise<string> {
-  const dir = socketDir("swamp-esp32");
-  await ensureSocketDir(dir);
-  return await socketPathFor(dir, modelId);
-}
-
-/**
- * The holder's status when it is up, `null` when it is not, and a thrown
- * error when something is there but broken. `holder: false` short-circuits
- * to `null` without touching the socket.
- */
-async function holderIfEnabled(
-  ctx: MethodContext,
-  socket: string,
-): Promise<Awaited<ReturnType<typeof SerialLink.holderStatus>>> {
-  if (!ctx.globalArgs.holder) return null;
-  return await SerialLink.holderStatus(socket);
-}
 
 /**
  * Split a raw-REPL reply into stdout and stderr.
@@ -315,103 +260,6 @@ export function parseRawReply(
     error: stripEscapes(error),
     complete,
   };
-}
-
-/** Find the last complete JSON object line in a chunk of serial output. */
-export function lastJsonLine(data: string): Record<string, unknown> | null {
-  const lines = stripEscapes(data).split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const t = lines[i].trim();
-    if (t.startsWith("{") && t.endsWith("}")) {
-      try {
-        return JSON.parse(t) as Record<string, unknown>;
-      } catch { /* keep looking */ }
-    }
-  }
-  return null;
-}
-
-/** Pick the device: configured, else the single candidate, else null. */
-export function selectDevice(
-  configured: string | undefined,
-  candidates: string[],
-): string | null {
-  if (configured) return configured;
-  return candidates.length === 1 ? candidates[0] : null;
-}
-
-interface Attached {
-  link: SerialLink;
-  device: string;
-  transport: "spawn" | "socket";
-}
-
-/**
- * Get a link to the board: through the holder when enabled and running,
- * else a per-call worker. Opens the port if the worker does not hold it,
- * resolving the device by auto-detect when none is configured, then lets
- * `settleMs` of stale bytes drain. Always closes (or disconnects).
- */
-async function withLink<T>(
-  ctx: MethodContext,
-  fn: (a: Attached) => Promise<T>,
-): Promise<T> {
-  const g = ctx.globalArgs;
-  const socket = await holderSocketPath(ctx.modelId);
-  let link: SerialLink;
-  let transport: "spawn" | "socket";
-  if (await holderIfEnabled(ctx, socket)) {
-    link = await SerialLink.create({ socketPath: socket });
-    transport = "socket";
-  } else {
-    if (g.holder) {
-      ctx.logger.warning(
-        "holder not running; opening the port for this call only",
-      );
-    }
-    link = await SerialLink.create({
-      workerPath: ctx.extensionFile(WORKER),
-      denoPath: g.denoPath,
-    });
-    transport = "spawn";
-  }
-  try {
-    const st = await link.status();
-    let device = st.open ? st.device! : null;
-    if (!device) {
-      device = await resolveDevice(ctx, link);
-      const opened = await link.open(device, g.baud);
-      if (!opened.ok) {
-        throw new Error(`cannot open ${device}: ${opened.error ?? "unknown"}`);
-      }
-      if (g.settleMs > 0) await link.read(g.settleMs); // discard stale bytes
-    }
-    return await fn({ link, device, transport });
-  } finally {
-    await link.close();
-  }
-}
-
-/** The configured device, or the one candidate on this host. */
-async function resolveDevice(
-  ctx: MethodContext,
-  link: SerialLink,
-): Promise<string> {
-  const g = ctx.globalArgs;
-  if (g.device) return g.device;
-  const d = await link.detect();
-  const chosen = selectDevice(undefined, d.candidates);
-  if (!chosen) {
-    throw new Error(
-      d.candidates.length === 0
-        ? "no serial device found; plug the board in, or set globalArgs.device"
-        : `several serial devices found (${
-          d.candidates.join(", ")
-        }); set globalArgs.device`,
-    );
-  }
-  ctx.logger.info("auto-detected {device}", { device: chosen });
-  return chosen;
 }
 
 /**
@@ -470,29 +318,6 @@ const PROBE = [
   "print(json.dumps({'implementation': repr(sys.implementation), 'release': u.release,",
   "  'version': u.version, 'machine': u.machine, 'files': os.listdir()}))",
 ].join("\n");
-
-/** Read the holder's state through a fresh connection, or report it down. */
-async function holderState(
-  ctx: MethodContext,
-): Promise<z.infer<typeof HolderSchema>> {
-  const socket = await holderSocketPath(ctx.modelId);
-  const base = {
-    socket,
-    idleTimeoutMs: ctx.globalArgs.holderIdleTimeoutMs,
-    observedAt: new Date().toISOString(),
-  };
-  const st = await SerialLink.holderStatus(socket);
-  if (!st) {
-    return { ...base, live: false, pid: null, device: null, requestsServed: 0 };
-  }
-  return {
-    ...base,
-    live: true,
-    pid: st.pid,
-    device: st.device,
-    requestsServed: st.requestsServed,
-  };
-}
 
 /** Hex sha256 of bytes. */
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -632,6 +457,7 @@ export const model = {
           selected: selected ?? "none",
         });
         const handle = await ctx.writeResource("devices", "devices-host", {
+          outcome: "ok",
           os: d.os,
           candidates: d.candidates,
           selected,
@@ -682,6 +508,7 @@ export const model = {
           },
         );
         const handle = await ctx.writeResource("link", "link-current", {
+          outcome: "ok",
           device: data.device,
           baud: g.baud,
           implementation: String(data.info.implementation),
@@ -741,6 +568,7 @@ export const model = {
           );
         }
         const handle = await ctx.writeResource("repl", "repl-latest", {
+          outcome: result.error ? "error" : result.complete ? "ok" : "timeout",
           code: args.code,
           ok: result.error === "" && result.complete,
           output: result.output,
@@ -794,6 +622,7 @@ export const model = {
         });
         const timedOut = result.reason === "timeout";
         const handle = await ctx.writeResource("command", "command-latest", {
+          outcome: result.response ? "ok" : "timeout",
           command: args.line,
           response: result.response ?? {},
           raw: result.raw,
@@ -842,6 +671,7 @@ export const model = {
         });
         const data = stripEscapes(r.data ?? "");
         const handle = await ctx.writeResource("capture", "capture-latest", {
+          outcome: (r.reason ?? "timeout") === "timeout" ? "timeout" : "ok",
           timeoutMs,
           data,
           bytes: new TextEncoder().encode(data).length,
@@ -865,6 +695,7 @@ export const model = {
           if (!r.ok) throw new Error(`write failed: ${r.error}`);
         });
         const handle = await ctx.writeResource("sent", "sent-latest", {
+          outcome: "ok",
           data: args.data,
           bytes: new TextEncoder().encode(args.data).length,
           observedAt: new Date().toISOString(),
@@ -959,6 +790,7 @@ export const model = {
           verified: r.verified ? "verified" : "NOT verified",
         });
         const handle = await ctx.writeResource("flash", "flash-latest", {
+          outcome: r.verified ? "ok" : "error",
           device,
           chip: args.chip,
           image: args.image,
@@ -1065,6 +897,7 @@ export const model = {
           ).join(", "),
         });
         const handle = await ctx.writeResource("upload", "upload-latest", {
+          outcome: results.every((f) => f.verified) ? "ok" : "partial",
           files: results,
           resumed: args.resume,
           observedAt: new Date().toISOString(),
@@ -1142,6 +975,7 @@ export const model = {
           count: scan.count,
         });
         const handle = await ctx.writeResource("wifi", "wifi-latest", {
+          outcome: "ok",
           mac: scan.mac,
           count: scan.count,
           networks: scan.networks,
@@ -1203,6 +1037,7 @@ export const model = {
           active: b.active,
         });
         const handle = await ctx.writeResource("ble", "ble-latest", {
+          outcome: b.active ? "ok" : "error",
           active: b.active,
           addrType: b.addrType,
           mac: b.mac,
@@ -1283,9 +1118,11 @@ export const model = {
         while (Date.now() < deadline && await SerialLink.holderLive(socket)) {
           await new Promise((r) => setTimeout(r, 50));
         }
+        const live = await SerialLink.holderLive(socket);
         const handle = await ctx.writeResource("holder", "holder-current", {
           ...before,
-          live: await SerialLink.holderLive(socket),
+          live,
+          outcome: live ? "error" : "ok",
           observedAt: new Date().toISOString(),
         });
         return { dataHandles: [handle] };

@@ -1,12 +1,11 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
+import { model, parseRawReply } from "./esp32_serial.ts";
 import {
   holderSocketPath,
   lastJsonLine,
-  model,
-  parseRawReply,
   selectDevice,
   stripEscapes,
-} from "./esp32_serial.ts";
+} from "./_lib/device.ts";
 import { resolveDenoPath } from "./_lib/serial_link.ts";
 
 Deno.test("globalArguments apply defaults; device is optional", () => {

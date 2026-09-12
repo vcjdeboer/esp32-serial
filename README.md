@@ -1,9 +1,10 @@
-# @vcjdeboer/esp32 v2026.09.11.5 — Swamp Club Extension
+# @vcjdeboer/esp32 v2026.09.12.1 — Swamp Club Extension
 
-Drive an ESP32 running MicroPython from swamp over USB serial, with no Arduino
-IDE. Flash the board, run Python through the raw REPL, speak your own firmware
-line-protocol, scan WiFi and Bluetooth — every exchange is recorded as
-versioned swamp data, keyed to the chip from the moment it is flashed.
+Drive ESP32 (and other MicroPython) boards from swamp over USB serial, with no
+Arduino IDE. Flash the board, run Python through the raw REPL, speak a firmware
+line-protocol or the UC2-ESP structured task protocol, scan WiFi and Bluetooth —
+every exchange is recorded as versioned swamp data, keyed to the chip from the
+moment it is flashed, and every record carries an explicit `outcome`.
 
 Developed and verified on an **AYWHP ESP32-C3 Super Mini (model XD055), chip
 ESP32-C3 revision v1.1**, running MicroPython v1.29.0. Any MicroPython board on
@@ -66,14 +67,29 @@ For faster back-to-back calls, keep the port open in a detached worker with
 
 ## Models
 
-| Model type | Manages | Methods |
-| --- | --- | --- |
-| `@vcjdeboer/esp32-serial` | One ESP32 on a USB-CDC serial port | `detect`, `flash`, `establish`, `repl`, `command`, `read`, `write`, `upload`, `wifi`, `ble`, `hold`, `release` |
+Two model types share one serial transport. The transport (`_lib` plus the
+worker) moves bytes and lines over a port, holds it open, and flashes; each
+model gives those lines meaning. Pick the one that matches your firmware.
 
-Describe the type and its arguments with
-`swamp model type describe @vcjdeboer/esp32-serial --compact --json`. Resource
-records are named `<spec>-latest` / `<spec>-current` (e.g. `command-latest`);
-reference them in workflows as `data.latest("c3", "flash-latest")`.
+| Model type | For | Methods |
+| --- | --- | --- |
+| `@vcjdeboer/esp32-serial` | A MicroPython board: the raw REPL and a simple one-JSON-line protocol | `detect`, `flash`, `establish`, `repl`, `command`, `read`, `write`, `upload`, `wifi`, `ble`, `hold`, `release` |
+| `@vcjdeboer/uc2-device` | A board speaking the UC2-ESP task protocol (`{task, qid, ...}` with ACK/event/DONE) | `detect`, `act`, `get`, `hold`, `release` |
+
+Drive a UC2-ESP endpoint and record the correlated exchange:
+
+```
+swamp model create @vcjdeboer/uc2-device scope --global-arg holder=true
+swamp model method run scope act --input task=/motor_act --input 'args={"steppers":[{"stepperid":1,"position":1000}]}'
+swamp model method run scope get --input task=/motor_get
+swamp data get scope act-latest --json    # acked, events, result, outcome
+```
+
+Describe a type with `swamp model type describe <type> --compact --json`.
+Records are named `<spec>-latest` / `<spec>-current` (e.g. `command-latest`,
+`act-latest`); reference them in workflows as `data.latest("c3", "flash-latest")`.
+Every record carries an explicit `outcome` (ok, error, partial, or timeout), so
+a run that fails partway is always distinguishable in the data.
 
 ## Operational limits
 
