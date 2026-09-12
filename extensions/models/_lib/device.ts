@@ -71,20 +71,6 @@ export function lastJsonLine(data: string): Record<string, unknown> | null {
   return null;
 }
 
-/** Parse every complete JSON object line in a chunk (order preserved). */
-export function jsonLines(data: string): Record<string, unknown>[] {
-  const out: Record<string, unknown>[] = [];
-  for (const line of stripEscapes(data).split("\n")) {
-    const t = line.trim();
-    if (t.startsWith("{") && t.endsWith("}")) {
-      try {
-        out.push(JSON.parse(t) as Record<string, unknown>);
-      } catch { /* skip noise */ }
-    }
-  }
-  return out;
-}
-
 /** Pick the device: configured, else the single candidate, else null. */
 export function selectDevice(
   configured: string | undefined,
